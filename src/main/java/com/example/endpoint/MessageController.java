@@ -1,6 +1,6 @@
 package com.example.endpoint;
 
-import com.example.Repository.MessageRepository;
+import com.example.repository.MessageRepository;
 import com.example.entity.Message;
 import io.quarkus.security.Authenticated;
 import jakarta.inject.Inject;

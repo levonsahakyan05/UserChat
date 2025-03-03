@@ -1,6 +1,6 @@
 package com.example.service;
 
-import com.example.Repository.MessageRepository;
+import com.example.repository.MessageRepository;
 import com.example.entity.Message;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;

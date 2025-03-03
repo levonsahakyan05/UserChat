@@ -1,4 +1,4 @@
-package com.example.Repository;
+package com.example.repository;
 
 import com.example.entity.User;
 import io.quarkus.hibernate.orm.panache.PanacheRepository;

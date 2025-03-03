@@ -1,5 +1,5 @@
 package com.example.service;
-import com.example.Repository.UserRepository;
+import com.example.repository.UserRepository;
 import com.example.entity.User;
 import com.example.entity.UserDto;
 import io.smallrye.jwt.build.Jwt;
