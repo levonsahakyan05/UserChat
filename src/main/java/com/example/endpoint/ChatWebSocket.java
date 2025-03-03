@@ -9,13 +9,18 @@ import jakarta.websocket.*;
 import jakarta.websocket.server.PathParam;
 import jakarta.websocket.server.ServerEndpoint;
 import org.eclipse.microprofile.jwt.JsonWebToken;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
 @ServerEndpoint("/chat/{email}")
 public class ChatWebSocket {
+    private static final Logger LOGGER = LoggerFactory.getLogger(ChatWebSocket.class);
     @Inject
     MessageService messageService;
 
@@ -25,6 +30,7 @@ public class ChatWebSocket {
     JWTParser jwtParser;
 
     private static final ConcurrentHashMap<String, Session> sessions = new ConcurrentHashMap<>();
+    private static final ConcurrentHashMap<String, Set<Session>> groups = new ConcurrentHashMap<>();
 
 
     @OnOpen
@@ -33,11 +39,13 @@ public class ChatWebSocket {
         if (!isValidToken(email, token)) {
             try {
                 session.close(new CloseReason(CloseReason.CloseCodes.VIOLATED_POLICY, "Invalid JWT token"));
-            } catch (Exception ignored) {}
+                LOGGER.warn("User {} failed authentication with an invalid token.", email);
+            } catch (Exception ignored) {
+            }
             return;
         }
         sessions.put(email, session);
-        System.out.println("User " + email + " has joined the chat. Total sessions: " + sessions.size());
+        LOGGER.info("User {} has joined the chat. Total sessions: {}", email, sessions.size());
         broadcast("User " + email + " has joined the chat.");
     }
 
@@ -45,33 +53,69 @@ public class ChatWebSocket {
 
     @OnMessage
     public void onMessage(String message, @PathParam("email") String sender) {
-        if (message.startsWith("@")) {
-            int index = message.indexOf(":");
-            if (index > 0) {
-                String receiverId = message.substring(1, index).trim();
-                String content = message.substring(index + 1).trim();
-                new Thread(() -> messageSender(sender, receiverId, content)).start();
-                sendPrivateMessage(sender, receiverId, content);
+        try {
+            if (message.startsWith("@")) {
+                int index = message.indexOf(":");
+                if (index > 0) {
+                    String receiver = message.substring(1, index).trim();
+                    String content = message.substring(index + 1).trim();
+                    new Thread(() -> messageSender(sender, receiver, content)).start();
+                    sendPrivateMessage(sender, receiver, content);
+                    return;
+                }
+            }
+            if (message.startsWith("group")) {
+                int groupIndex = message.indexOf(":");
+                if (groupIndex > 0) {
+                    String groupName = message.substring(5, groupIndex).trim();
+                    String content = message.substring(groupIndex + 1).trim();
+                    new Thread(() -> messageSender(sender, groupName, content)).start();
+                    sendGroupMessage(sender, groupName, content);
+                    return;
+                }
+            }
+            if (message.startsWith("!join")) {
+                String groupName = message.substring(6).trim();
+                addToGroup(sender, groupName);
+                Session senderSession = sessions.get(sender);
+                if (senderSession != null) {
+                    senderSession.getAsyncRemote().sendText("You have joined group: " + groupName);
+                }
                 return;
             }
+            new Thread(() -> {
+                messageSender(sender, "all", message);
+                broadcast(sender + ": " + message);
+            }).start();
+        }catch(Exception e) {
+            LOGGER.error("Error handling message from {}: {}", sender, e.getMessage());
         }
-        new Thread(() -> {
-            messageSender(sender, "all", message);
-            broadcast(sender + ": " + message);
-        }).start();
     }
-
 
     @OnClose
     public void onClose(@PathParam("email") String email) {
-        sessions.remove(email);
-        System.out.println("User " + email + " has left the chat. Total sessions: " + sessions.size());
-        broadcast("User " + email + " has left the chat.");
+        try {
+            sessions.remove(email);
+            for (Set<Session> group : groups.values()) {
+                group.remove(sessions.get(email));
+            }
+            LOGGER.info("User {} has left the chat. Total sessions: {}", email, sessions.size());
+            broadcast("User " + email + " has left the chat.");
+        }catch(Exception e) {
+            LOGGER.error("Error handling user disconnect for {}: {}", email, e.getMessage());
+        }
     }
 
     @OnError
     public void onError(Session session, Throwable throwable) {
-        throwable.printStackTrace();
+        LOGGER.error("Error with session {}: {}", session.getId(), throwable.getMessage(), throwable);
+        if (session != null) {
+            try {
+                session.close(new CloseReason(CloseReason.CloseCodes.UNEXPECTED_CONDITION, "Unexpected error"));
+            } catch (Exception closeEx) {
+                LOGGER.error("Error closing session {}: {}", session.getId(), closeEx.getMessage());
+            }
+        }
     }
 
     private void broadcast(String message) {
@@ -95,6 +139,23 @@ public class ChatWebSocket {
             }
         }
     }
+    private void addToGroup(String email, String groupName) {
+        groups.computeIfAbsent(groupName, k -> new HashSet<>()).add(sessions.get(email));
+    }
+    private void sendGroupMessage(String sender, String groupName, String content) {
+        Set<Session> group = groups.get(groupName);
+        if (group != null) {
+            for (Session session : group) {
+                session.getAsyncRemote().sendText("[Group: " + groupName + "] " + sender + ": " + content);
+            }
+        } else {
+            Session senderSession = sessions.get(sender);
+            if (senderSession != null) {
+                senderSession.getAsyncRemote().sendText("Group " + groupName + " does not exist.");
+            }
+        }
+    }
+
     private String getTokenFromSession(Session session) {
         Map<String, List<String>> params = session.getRequestParameterMap();
         return (params.containsKey("token") && !params.get("token").isEmpty())
@@ -107,7 +168,7 @@ public class ChatWebSocket {
             String subject = jwtPrincipal.getSubject();
             return email.equals(subject);
         } catch (Exception e) {
-            System.out.println("Invalid token: " + e.getMessage());
+            LOGGER.warn("Invalid token for user {}: {}", email, e.getMessage());
             return false;
         }
     }
